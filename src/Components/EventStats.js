@@ -282,17 +282,19 @@ const SeenOn = ({ relays }) => {
     }, [relays])
 
     return (
-        <div className="fit-container fx-centered fx-col fx-start-v" style={{ rowGap: '8px' }}>
+        <div className="fit-container fx-centered fx-col fx-start-v" style={{ rowGap: '4px' }}>
             <p className="gray-c p-medium box-pad-h-m">{t("Ayah3Dw")}</p>
-            <HorizontalScrollWrapper gap="8px" padding="0 16px">
+            <HorizontalScrollWrapper gap="4px" padding="0 16px">
                 {relays.map(relay => (
                     <div
-                        className="fx-centered sc-s-18 box-pad-h-s box-pad-v-s"
-                        style={{ columnGap: '8px', minWidth: 'max-content' }}
+                        className="sticker sticker-normal sticker-small sticker-gray"
+                        style={{ maxWidth: '180px', gap: '4px', alignItems: 'center' }}
                         key={relay}
                     >
-                        <RelayImage url={relay} size={24} />
-                        <p className="p-medium">{relay.replace("wss://", "").replace("ws://", "")}</p>
+                        <RelayImage url={relay} size={16} />
+                        <p className="p-one-line gray-c" style={{ margin: 0 }}>
+                            {relay.replace("wss://", "").replace("ws://", "")}
+                        </p>
                     </div>
                 ))}
             </HorizontalScrollWrapper>
@@ -487,11 +489,12 @@ const StatsOverlay = ({ postActions, isRepEvent = false, seenOn = [], exit }) =>
             </div>
             {relays.length > 0 && (
                 <div
-                    className="fit-container box-pad-v-m"
+                    className="fit-container bg-dropdown box-pad-v-s"
                     style={{
                         position: 'sticky',
                         bottom: 0,
-                        backgroundColor: 'var(--white)',
+                        borderRadius: 0,
+                        boxShadow: 'none',
                         zIndex: 10,
                     }}
                 >
