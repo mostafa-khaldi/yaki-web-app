@@ -12,6 +12,9 @@ import NumberShrink from './NumberShrink'
 import EmojiImg from './EmojiImg'
 import Spinner from './Spinner'
 import { useTheme } from 'next-themes'
+import RelayImage from './RelayImage'
+import HorizontalScrollWrapper from './HorizontalScrollWrapper'
+import { saveRelayMetadata } from '@/Helpers/Controlers'
 
 const BATCH_SIZE = 20
 
@@ -248,13 +251,52 @@ const StatsBarChart = ({ postActions, isRepEvent = false }) => {
     )
 }
 
-export default function EventStats({ postActions, isRepEvent = false }) {
+export default function EventStats({ postActions, isRepEvent = false, seenOn = [] }) {
     const [showStats, setShowStats] = React.useState(false)
     return (
         <>
-            {showStats && <StatsOverlay postActions={postActions} isRepEvent={isRepEvent} exit={() => setShowStats(false)} />}
+            {showStats && <StatsOverlay postActions={postActions} isRepEvent={isRepEvent} seenOn={seenOn} exit={() => setShowStats(false)} />}
             <Icon v={2} name={iconsNames.chart_bar_vertical_01} size={20} opacity='.5' onClick={() => setShowStats(true)} />
         </>
+    )
+}
+
+const SeenOn = ({ relays }) => {
+    const { t } = useTranslation()
+    const [, setRefresh] = React.useState(0)
+
+    React.useEffect(() => {
+        let isActive = true
+        const fetchData = async () => {
+            try {
+                await saveRelayMetadata(relays)
+                if (isActive) setRefresh(prev => prev + 1)
+            } catch (err) {
+                console.log(err)
+            }
+        }
+        fetchData()
+        return () => {
+            isActive = false
+        }
+    }, [relays])
+
+    return (
+        <div className="fit-container fx-centered fx-col fx-start-v" style={{ rowGap: '8px' }}>
+            <p className="gray-c p-medium box-pad-h-m">{t("Ayah3Dw")}</p>
+            <HorizontalScrollWrapper gap="8px" padding="0 16px">
+                {relays.map(relay => (
+                    <div
+                        className="fx-centered sc-s-18 box-pad-h-s box-pad-v-s"
+                        style={{ columnGap: '8px', minWidth: 'max-content' }}
+                        key={relay}
+                    >
+                        <RelayImage url={relay} size={24} />
+                        <p className="p-medium">{relay.replace("wss://", "").replace("ws://", "")}</p>
+                    </div>
+                ))}
+            </HorizontalScrollWrapper>
+        </div>
     )
 }
 
@@ -411,7 +453,7 @@ const PeopleList = ({ items, tab, cache, setCache }) => {
     )
 }
 
-const StatsOverlay = ({ postActions, isRepEvent = false, exit }) => {
+const StatsOverlay = ({ postActions, isRepEvent = false, seenOn = [], exit }) => {
     const { t } = useTranslation()
     const [selectedTab, setSelectedTab] = React.useState(0)
     const [peopleCache, setPeopleCache] = React.useState({})
@@ -431,6 +473,11 @@ const StatsOverlay = ({ postActions, isRepEvent = false, exit }) => {
 
     const items = React.useMemo(() => getItemsForTab(postActions, selectedTab, isRepEvent), [postActions, selectedTab, isRepEvent])
 
+    const relays = React.useMemo(
+        () => [...new Set((seenOn || []).filter(Boolean).map(relay => relay.replace(/\/+$/, "")))],
+        [seenOn],
+    )
+
     return (
         <Overlay exit={exit} width={600}>
             <div className="fx-centered fx-col fx-start-h fit-container box-pad-v-m box-pad-h-m" style={{ rowGap: '16px' }}>
@@ -438,6 +485,19 @@ const StatsOverlay = ({ postActions, isRepEvent = false, exit }) => {
                 <SelectTabs selectedTab={selectedTab} setSelectedTab={setSelectedTab} tabs={tabs} />
                 <PeopleList key={selectedTab} items={items} tab={selectedTab} cache={peopleCache} setCache={setPeopleCache} />
             </div>
+            {relays.length > 0 && (
+                <div
+                    className="fit-container box-pad-v-m"
+                    style={{
+                        position: 'sticky',
+                        bottom: 0,
+                        backgroundColor: 'var(--white)',
+                        zIndex: 10,
+                    }}
+                >
+                    <SeenOn relays={relays} />
+                </div>
+            )}
         </Overlay>
     )
 }
