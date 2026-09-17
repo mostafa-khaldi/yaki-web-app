@@ -5,8 +5,9 @@ import {
   holdHintRelays,
   releaseHintRelays,
 } from "@/Helpers/SSGNDKInstance";
+import { NDKRelaySet } from "@nostr-dev-kit/ndk";
 import { nip19, sortEvents } from "nostr-tools";
-import { getAuthPubkeyFromNip05, sleepTimer } from "./Helpers";
+import { getAuthPubkeyFromNip05 } from "./Helpers";
 import { bannedListSet } from "@/Content/BannedList";
 import axios from "axios";
 
@@ -21,10 +22,14 @@ export async function getDataForSSG(
   holdHintRelays(ndkInstance, hintUrls);
   let data;
   try {
-    data = await Promise.race([
-      launchDataFetching(filter, timeout, maxEvents, ndkInstance, undefined, hintUrls),
-      sleepTimer(Math.max(timeout, 1000) + 4000),
-    ]);
+    data = await launchDataFetching(
+      filter,
+      timeout,
+      maxEvents,
+      ndkInstance,
+      undefined,
+      hintUrls,
+    );
   } finally {
     releaseHintRelays(ndkInstance, hintUrls);
   }
@@ -155,19 +160,40 @@ const launchDataFetching = async (
       resolve({ data: [], pubkeys: [] });
       return;
     }
-    let relayUrls = [
-      ...new Set([
-        ...ndkInstance.pool.connectedRelays().map((relay) => relay.url),
-        ...hintUrls,
-      ]),
+    // Build the relay set from live relay objects rather than passing
+    // `relayUrls`. NDKSubscription resolves `relayUrls` through
+    // `NDKRelaySet.fromRelayUrls`, which looks the URL up in `pool.relays` and,
+    // on a miss, constructs a brand new NDKRelay and registers it as a 30s
+    // temporary relay. That duplicate is not in the hint cache, so neither
+    // `closeAbandonedRelaySubs` nor `dropHintRelay` can ever reach it, and
+    // MAX_HINT_RELAYS does not bound it. A pool miss is not hypothetical:
+    // `NDKPool.addRelay` refuses any URL containing "/npub1", so hint relays of
+    // that shape are handed back by `useHintRelays` without ever entering the
+    // pool. `opts.relaySet` is checked before `opts.relayUrls`, so this path
+    // bypasses `fromRelayUrls` entirely.
+    //
+    // Filtering on `connected` also keeps REQs off relays that are still in
+    // WAITING, which would otherwise retain one relay-sub plus a "ready"
+    // listener per request.
+    let hintUrlSet = new Set(hintUrls);
+    let relayObjects = [
+      ...ndkInstance.pool.connectedRelays(),
+      ...getHintRelayObjects(ndkInstance).filter(
+        (relay) => hintUrlSet.has(relay.url) && relay.connected,
+      ),
     ];
-    if (relayUrls.length === 0) {
+    let relaySet = new NDKRelaySet(
+      new Set(relayObjects),
+      ndkInstance,
+      ndkInstance.pool,
+    );
+    if (relaySet.relays.size === 0) {
       resolve({ data: [], pubkeys: [] });
       return;
     }
     let sub = ndkInstance.subscribe(filter_, {
       groupable: false,
-      relayUrls,
+      relaySet,
       // cacheUsage: "ONLY_RELAY",
     });
     const stopSub = () => {
@@ -175,16 +201,35 @@ const launchDataFetching = async (
       closeAbandonedRelaySubs(ndkInstance);
     };
     let timer;
+    let deadline;
+    const finish = (payload) => {
+      if (timer) clearTimeout(timer);
+      if (deadline) clearTimeout(deadline);
+      stopSub();
+      resolve(payload);
+    };
     const startTimer = () => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
-        stopSub();
-        resolve({
+        finish({
           data: sortEvents(events),
           pubkeys: [...new Set(pubkeys)],
         });
       }, timeout);
     };
+
+    // Hard ceiling that `startTimer` cannot push back. Previously this was an
+    // outer `Promise.race` against `sleepTimer` in the callers, but a race does
+    // not cancel the loser: when the timer won, the caller returned and released
+    // its hint-relay holds while this subscription was still live, and the page
+    // rendered with no event. Owning the deadline here keeps stop-then-release
+    // in the right order on every path.
+    deadline = setTimeout(() => {
+      finish({
+        data: sortEvents(events),
+        pubkeys: [...new Set(pubkeys)],
+      });
+    }, Math.max(timeout, 1000) + 4000);
 
     startTimer();
 
@@ -204,18 +249,14 @@ const launchDataFetching = async (
           }
         }
         if (maxEvents === 1) {
-          if (timer) clearTimeout(timer);
-          stopSub();
-          resolve({
+          finish({
             data: events,
             pubkeys: [...new Set(pubkeys)],
           });
           return;
         }
         if (events.length > maxEvents) {
-          if (timer) clearTimeout(timer);
-          stopSub();
-          resolve({
+          finish({
             data: sortEvents(events),
             pubkeys: [...new Set(pubkeys)],
           });
