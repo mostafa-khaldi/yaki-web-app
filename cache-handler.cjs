@@ -67,8 +67,19 @@ const isEvictable = (key) => {
   return EVICTABLE_ROUTES.some((prefix) => k.startsWith(prefix));
 };
 
-const MAX_BYTES = Number(process.env.ISR_CACHE_MAX_BYTES || 2 * 1024 * 1024 * 1024);
-const MAX_ENTRIES = Number(process.env.ISR_CACHE_MAX_ENTRIES || 50000);
+/**
+ * Defaults are deliberately small. The cap is not only a disk limit: the size
+ * of this directory is also what anything that walks it has to pay, including
+ * `seed()` below and Docker/Coolify container-size collection. Measured
+ * 2026-09-17: a 220k-file pages dir took seconds to walk, while 5k entries
+ * takes single-digit milliseconds.
+ *
+ * Repeat-hit rate on /note was measured at ~0% (302 pages written in 10 min,
+ * zero rewrites), so a large note cache buys nothing. /article does have real
+ * repeat readers and is what the remaining headroom is for.
+ */
+const MAX_BYTES = Number(process.env.ISR_CACHE_MAX_BYTES || 300 * 1024 * 1024);
+const MAX_ENTRIES = Number(process.env.ISR_CACHE_MAX_ENTRIES || 5000);
 
 // Process-wide, not per-instance: Next may construct more than one handler.
 const store = (globalThis.__yakiIsrCache ??= {
@@ -76,7 +87,8 @@ const store = (globalThis.__yakiIsrCache ??= {
   // from the front and needs no sorting.
   entries: new Map(), // shortKey -> { bytes, files: string[] }
   totalBytes: 0,
-  seeded: false,
+  seeded: false,   // a seed has been started
+  seedDone: false, // ...and has finished; eviction waits for this
 });
 
 const statSize = (file) => {
@@ -101,28 +113,39 @@ module.exports = class YakiCacheHandler extends FileSystemCache {
   /**
    * Adopt whatever is already on disk from previous runs, once, so a restart
    * does not start counting from zero against a cache that is already large.
-   * Walks the pages dir a single time; all later accounting is incremental.
+   *
+   * This runs OFF the request path. A synchronous walk here would block the
+   * event loop for as long as the directory takes to traverse -- measured at
+   * ~4.4s for 200k entries on a local SSD, and production was found holding
+   * 220,431 files on a slower disk. Blocking the first render that long risks
+   * tripping the 10s healthcheck, which restarts the container, which seeds
+   * again: a restart loop on an otherwise-healthy deploy.
+   *
+   * So the walk is async and yields to the event loop between directories.
+   * Renders proceed normally while it runs; `set()` simply accounts for its
+   * own entries and lets eviction start once seeding completes.
    */
-  seed() {
+  async seed() {
     if (store.seeded) return;
-    store.seeded = true;
+    store.seeded = true; // claim immediately so concurrent set()s do not re-enter
     let root;
     try {
       root = this.getFilePath("x.html", "PAGES").replace(/x\.html$/, "");
     } catch (err) {
+      store.seedDone = true;
       return;
     }
-    const walk = (dir) => {
+    const walk = async (dir) => {
       let items;
       try {
-        items = fs.readdirSync(dir, { withFileTypes: true });
+        items = await fs.promises.readdir(dir, { withFileTypes: true });
       } catch (err) {
         return;
       }
       for (const item of items) {
         const full = path.join(dir, item.name);
         if (item.isDirectory()) {
-          walk(full);
+          await walk(full);
           continue;
         }
         if (!item.name.endsWith(".html")) continue;
@@ -133,12 +156,23 @@ module.exports = class YakiCacheHandler extends FileSystemCache {
         // would 404 that route until the next build. Only adopt entries under
         // the dynamic content routes.
         if (!isEvictable(key)) continue;
+        // An entry already accounted for by a live set() is newer than what is
+        // on disk: leave its position and byte count alone.
+        if (store.entries.has(key)) continue;
         const bytes = statSize(full) + statSize(json);
         store.entries.set(key, { bytes, files: [full, json] });
         store.totalBytes += bytes;
       }
+      // Yield between directories so a large tree never monopolises the loop.
+      await new Promise((resolve) => setImmediate(resolve));
     };
-    walk(root);
+    try {
+      await walk(root);
+    } catch (err) {
+      // A partial seed is fine: unadopted files are picked up when rewritten.
+    } finally {
+      store.seedDone = true;
+    }
   }
 
   /** Delete oldest entries until the cache is back inside both limits. */
@@ -170,7 +204,12 @@ module.exports = class YakiCacheHandler extends FileSystemCache {
     if (!isEvictable(key)) return result;
 
     try {
-      this.seed();
+      // Fire-and-forget: never await the seed on a render. Until it finishes,
+      // `store` holds only entries this process wrote, so eviction is deferred
+      // (see below) rather than acting on a partial view of the directory.
+      if (!store.seeded) {
+        this.seed().catch(() => {});
+      }
       const files = this.entryFiles(shortKey);
       if (files.length === 0) return result;
       const bytes = files.reduce((n, f) => n + statSize(f), 0);
@@ -183,7 +222,13 @@ module.exports = class YakiCacheHandler extends FileSystemCache {
       store.entries.set(shortKey, { bytes, files });
       store.totalBytes += bytes;
 
-      if (store.totalBytes > MAX_BYTES || store.entries.size > MAX_ENTRIES) {
+      // Only evict once the seed has finished. Evicting mid-seed would delete
+      // the newest entries (the only ones adopted so far) while older files on
+      // disk stayed invisible and unbounded -- exactly backwards.
+      if (
+        store.seedDone &&
+        (store.totalBytes > MAX_BYTES || store.entries.size > MAX_ENTRIES)
+      ) {
         this.evict();
       }
     } catch (err) {
