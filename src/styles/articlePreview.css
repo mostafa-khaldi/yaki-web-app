@@ -120,6 +120,18 @@
   cursor: pointer;
 }
 
+/* Inline nostr mentions (npub / nprofile / nevent … mixed with text) */
+.article-preview .nostr-inline-entity {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  max-width: 100%;
+}
+
+.article-preview .nostr-inline-entity a {
+  text-decoration: none;
+}
+
 .article-preview mark {
   background-color: rgba(238, 119, 0, 0.2);
   border-radius: 3px;

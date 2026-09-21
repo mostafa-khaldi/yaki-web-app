@@ -4,44 +4,15 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeRaw from "rehype-raw";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import Link from "next/link";
 import Nip19Parsing from "@/Components/Nip19Parsing";
+import { getLinkFromAddr } from "@/Helpers/Helpers";
+import remarkNostrEntities from "@/Helpers/remarkNostrEntities";
 
-// Matches a standalone nostr bech32 URI with or without "nostr:" prefix
-const NOSTR_ADDR_RE =
-  /^(?:nostr:)?(naddr1|note1|nevent1|npub1|nprofile1)[a-z0-9]+$/;
-
-function walkTree(node, parent, index) {
-  if (node.type === "paragraph" && parent != null && index != null) {
-    if (node.children.length === 1 && node.children[0].type === "text") {
-      const text = node.children[0].value.trim();
-      const match = text.match(NOSTR_ADDR_RE);
-      if (match) {
-        const addr = text.startsWith("nostr:") ? text.slice(6) : text;
-        parent.children[index] = {
-          type: "nostrEmbed",
-          data: {
-            hName: "div",
-            hProperties: { "data-nostr-addr": addr },
-          },
-          addr,
-          children: [],
-        };
-        return;
-      }
-    }
-  }
-  if (node.children) {
-    node.children.forEach((child, i) => walkTree(child, node, i));
-  }
-}
-
-/**
- * Remark plugin: converts any paragraph whose sole text content is a nostr
- * bech32 token into a custom node that renders as Nip19Parsing.
- * Mirrors YakiPro's NostrEntityExtension parseHTML.updateDOM logic.
- */
-function remarkNostrEmbeds() {
-  return (tree) => walkTree(tree, null, null);
+function nostrHrefToRoute(href) {
+  if (typeof href !== "string" || !/^nostr:/i.test(href)) return null;
+  const route = getLinkFromAddr(href);
+  return route && route.startsWith("/") ? route : null;
 }
 
 export default function ArticlePreview({ content }) {
@@ -50,10 +21,10 @@ export default function ArticlePreview({ content }) {
   return (
     <div className="article-preview">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkNostrEmbeds]}
+        remarkPlugins={[remarkGfm, remarkNostrEntities]}
         rehypePlugins={[rehypeHighlight, rehypeRaw]}
         components={{
-          // Custom node rendered by remarkNostrEmbeds → hast div[data-nostr-addr]
+          // Standalone entity → hast div[data-nostr-addr]
           div({ node, ...props }) {
             const addr = node?.properties?.["dataNostrAddr"];
             if (addr) {
@@ -64,6 +35,36 @@ export default function ArticlePreview({ content }) {
               );
             }
             return <div {...props} />;
+          },
+
+          // Inline entity → hast span[data-nostr-inline]
+          span({ node, ...props }) {
+            const addr = node?.properties?.["dataNostrInline"];
+            if (addr) {
+              return (
+                <span className="nostr-inline-entity">
+                  <Nip19Parsing addr={addr} minimal={true} />
+                </span>
+              );
+            }
+            return <span {...props} />;
+          },
+
+          // [label](nostr:…) links open the entity inside the app
+          a({ node, href, children, ...props }) {
+            const route = nostrHrefToRoute(href);
+            if (route) {
+              return (
+                <Link href={route} {...props}>
+                  {children}
+                </Link>
+              );
+            }
+            return (
+              <a href={href} {...props}>
+                {children}
+              </a>
+            );
           },
 
           // react-markdown v10: distinguish inline vs block via className presence
