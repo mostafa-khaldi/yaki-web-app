@@ -2,6 +2,7 @@ import { Node, mergeAttributes, ReactNodeViewRenderer, NodeViewWrapper } from "@
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import React from "react";
 import Nip19Parsing from "@/Components/Nip19Parsing";
+import { splitTextByEntities } from "@/Helpers/NostrEntityParsing";
 
 function MentionView({ node }) {
   const { addr } = node.attrs;
@@ -70,34 +71,46 @@ const MentionExtension = Node.create({
         },
         parse: {
           updateDOM(element) {
-            const regex = /nostr:(nprofile1[a-zA-Z0-9]+|npub1[a-zA-Z0-9]+)/g;
-            element.querySelectorAll("p").forEach((p) => {
-              const textNodes = [];
-              const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
-              let n;
-              while ((n = walker.nextNode())) textNodes.push(n);
-
-              textNodes.forEach((textNode) => {
-                const text = textNode.textContent;
-                regex.lastIndex = 0;
-                if (!regex.test(text)) return;
-                regex.lastIndex = 0;
-
-                const frag = document.createDocumentFragment();
-                let lastIndex = 0;
-                let match;
-                while ((match = regex.exec(text))) {
-                  frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
-                  const span = document.createElement("span");
-                  span.setAttribute("data-mention", match[1]);
-                  span.setAttribute("addr", match[1]);
-                  frag.appendChild(span);
-                  lastIndex = match.index + match[0].length;
+            // Shared rule: any entity left in running text becomes an inline
+            // mention, matching ArticlePreview. Entities standing alone in a
+            // paragraph are already block embeds by the time this runs.
+            const SKIP = new Set(["A", "CODE", "PRE"]);
+            element
+              .querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, td, th")
+              .forEach((block) => {
+                const textNodes = [];
+                const walker = document.createTreeWalker(
+                  block,
+                  NodeFilter.SHOW_TEXT,
+                );
+                let n;
+                while ((n = walker.nextNode())) {
+                  // Never rewrite inside a link label or a code sample.
+                  let skip = false;
+                  for (let el = n.parentElement; el && el !== block; el = el.parentElement) {
+                    if (SKIP.has(el.tagName)) { skip = true; break; }
+                  }
+                  if (!skip) textNodes.push(n);
                 }
-                frag.appendChild(document.createTextNode(text.slice(lastIndex)));
-                textNode.replaceWith(frag);
+
+                textNodes.forEach((textNode) => {
+                  const parts = splitTextByEntities(textNode.textContent);
+                  if (!parts) return;
+
+                  const frag = document.createDocumentFragment();
+                  parts.forEach((part) => {
+                    if (part.type === "entity") {
+                      const span = document.createElement("span");
+                      span.setAttribute("data-mention", part.addr);
+                      span.setAttribute("addr", part.addr);
+                      frag.appendChild(span);
+                    } else {
+                      frag.appendChild(document.createTextNode(part.value));
+                    }
+                  });
+                  textNode.replaceWith(frag);
+                });
               });
-            });
           },
         },
       },
