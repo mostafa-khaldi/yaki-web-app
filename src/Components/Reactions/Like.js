@@ -17,6 +17,7 @@ import Icon from "@/Components/Icon";
 import { iconsNames } from "@/Content/IconV2URL";
 import NumberShrink from "../NumberShrink";
 import Spinner from "../Spinner";
+import useFlipPosition from "@/Hooks/useFlipPosition";
 
 export default function Like({ isLiked, event, actions, tagKind = "e", total }) {
   const dispatch = useDispatch();
@@ -30,6 +31,9 @@ export default function Like({ isLiked, event, actions, tagKind = "e", total }) 
   const isDarkMode = ["dark", "gray", "system"].includes(resolvedTheme);
   const [showEmoji, setShowEmoji] = useState(false);
   const optionsRef = useRef(null);
+  const pickerRef = useRef(null);
+  // Flip below the trigger when there is no room above (issue #127).
+  const { flip, shiftX, shiftY } = useFlipPosition(pickerRef, showEmoji, 350);
 
   useEffect(() => {
     const handleOffClick = (e) => {
@@ -199,10 +203,16 @@ export default function Like({ isLiked, event, actions, tagKind = "e", total }) 
         </div>
         {showEmoji && (
           <div
+            ref={pickerRef}
             className={"drop-down-r"}
             style={{
               position: "absolute",
-              bottom: "calc(100% + 5px)",
+              ...(flip
+                ? { top: "calc(100% + 5px)", bottom: "auto" }
+                : { bottom: "calc(100% + 5px)" }),
+              ...(shiftX || shiftY
+                ? { transform: `translate(${shiftX}px, ${shiftY}px)` }
+                : {}),
               zIndex: 102,
             }}
           >

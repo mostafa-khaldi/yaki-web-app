@@ -32,6 +32,7 @@ import {
   setEventFromCache,
 } from "@/Helpers/utils/eventsCache";
 import MediaEventPreview from "./MediaEventPreview";
+import { requestEntity } from "@/Helpers/NostrEntityBatcher";
 
 const getPreviouslyCachedEvent = (addr) => {
   try {
@@ -91,6 +92,10 @@ function Nip19Parsing({ addr, minimal = false }) {
     if (event) return;
     let filter = [];
     let relays = [];
+    // Author / event-id lookups are routed through the shared batcher so a
+    // page full of mentions issues a few REQs instead of one per mention.
+    let batchKind = null;
+    let batchKey = null;
     try {
       let addr_ = addr
         .replaceAll(",", "")
@@ -120,6 +125,8 @@ function Nip19Parsing({ addr, minimal = false }) {
           kinds: [0],
           authors: [data.data.pubkey],
         });
+        batchKind = "author";
+        batchKey = data.data.pubkey;
         let url_ = `/profile/${addr_}`;
         setUrl(url_);
       }
@@ -133,6 +140,8 @@ function Nip19Parsing({ addr, minimal = false }) {
           kinds: [0],
           authors: [pubkey],
         });
+        batchKind = "author";
+        batchKey = pubkey;
         let hex = getHex(addr_.replace(",", "").replace(".", ""));
         let url_ = `/profile/${nip19.nprofileEncode({ pubkey: hex })}`;
         setUrl(url_);
@@ -144,6 +153,8 @@ function Nip19Parsing({ addr, minimal = false }) {
         filter.push({
           ids: [data.data.id || data.data],
         });
+        batchKind = "id";
+        batchKey = data.data.id || data.data;
       }
     } catch (err) {
       console.log(err);
@@ -157,13 +168,7 @@ function Nip19Parsing({ addr, minimal = false }) {
       return;
     }
 
-    const sub = ndkInstance.subscribe(filter, {
-      cacheUsage: "CACHE_FIRST",
-      groupable: false,
-      subId: "nip19-parsing",
-      relayUrls: relays || ndkInstance.explicitRelayUrls,
-    });
-    sub.on("event", (event) => {
+    const handleEvent = (event) => {
       if (event.id) {
         setNewlyFetchedEventToCache(event);
         if (event.kind === 0) {
@@ -223,9 +228,33 @@ function Nip19Parsing({ addr, minimal = false }) {
         }
         saveUsers([event.pubkey]);
         setIsLoading(false);
-        sub.stop();
+        if (stopDirectSub) stopDirectSub();
       }
-    });
+    };
+
+    let stopDirectSub = null;
+    let release = null;
+
+    if (batchKind && batchKey) {
+      release = requestEntity(batchKind, batchKey, relays, handleEvent);
+    } else {
+      const sub = ndkInstance.subscribe(filter, {
+        cacheUsage: "CACHE_FIRST",
+        groupable: false,
+        subId: "nip19-parsing",
+        closeOnEose: true,
+        relayUrls: relays?.length ? relays : ndkInstance.explicitRelayUrls,
+      });
+      stopDirectSub = () => {
+        try {
+          sub.stop();
+        } catch {
+          /* already stopped */
+        }
+      };
+      sub.on("event", handleEvent);
+      sub.on("eose", () => stopDirectSub());
+    }
 
     let timer = setTimeout(() => {
       setIsLoading(false);
@@ -233,7 +262,8 @@ function Nip19Parsing({ addr, minimal = false }) {
     }, 4000);
 
     return () => {
-      sub.stop();
+      if (release) release();
+      if (stopDirectSub) stopDirectSub();
       clearTimeout(timer);
     };
   }, []);
@@ -252,14 +282,14 @@ function Nip19Parsing({ addr, minimal = false }) {
             @{addr.substring(0, 10)}
           </Link>
         )}
-        {!isParsed && <p>{addr}</p>}
+        {!isParsed && (minimal ? <span>{addr}</span> : <p>{addr}</p>)}
       </>
     );
   if (!event && isUnsupported)
     return (
       <>
         {isParsed && <UnsupportedKindPreview addr={addr} />}
-        {!isParsed && <p>{addr}</p>}
+        {!isParsed && (minimal ? <span>{addr}</span> : <p>{addr}</p>)}
       </>
     );
   if (
